@@ -10,6 +10,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.hardware.camera2.CameraManager;
 import android.location.Location;
 import android.os.Build;
 import android.os.IBinder;
@@ -42,34 +43,81 @@ public class RastreadorGpsService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        // 1. Preparamos el cliente de GPS de Google
         locClient = LocationServices.getFusedLocationProviderClient(this);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // 2. Android 12 exige que el servicio se declare en primer plano en los primeros 5 segundos
         crearNotificacionFija();
 
-        // 3. Adquirimos un WakeLock para evitar que el CPU se duerma
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SeguridadApp::GpsWakeLock");
-            wakeLock.acquire(30000); // Lo soltamos máximo a los 30 seg
+            wakeLock.acquire(30000);
         }
 
-        // 4. Obtenemos la ubicación y enviamos el SMS
+        // ¡AQUÍ ACTIVAMOS LA NUEVA BALIZA SOS!
+        lanzarBalizaSOS();
+
+        // Y paralelamente sacamos el GPS y mandamos el SMS
         obtenerUbicacionYEnviar();
 
-        // 5. Programamos la repetición exacta para dentro de 5 minutos
         programarSiguienteEjecucion();
 
-        return START_STICKY; // Si el sistema lo mata por memoria, que lo vuelva a encender
+        return START_STICKY;
+    }
+
+    // --- NUEVA FUNCIONALIDAD: BALIZA SOS EN SEGUNDO PLANO ---
+    private void lanzarBalizaSOS() {
+        CameraManager cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        if (cameraManager == null) return;
+
+        // Creamos un hilo fantasma para que la app no se trabe mientras parpadea la luz
+        new Thread(() -> {
+            try {
+                // Obtenemos el ID de la cámara trasera principal (generalmente es el "0")
+                String cameraId = cameraManager.getCameraIdList()[0];
+
+                // Repetimos el ciclo S-O-S exactamente 5 veces
+                for (int ciclo = 0; ciclo < 5; ciclo++) {
+
+                    // Letra S (Tres destellos cortos)
+                    for (int i = 0; i < 3; i++) {
+                        cameraManager.setTorchMode(cameraId, true);
+                        Thread.sleep(150); // Encendido
+                        cameraManager.setTorchMode(cameraId, false);
+                        Thread.sleep(150); // Apagado
+                    }
+                    Thread.sleep(300); // Pausa entre letras
+
+                    // Letra O (Tres destellos largos)
+                    for (int i = 0; i < 3; i++) {
+                        cameraManager.setTorchMode(cameraId, true);
+                        Thread.sleep(500); // Encendido largo
+                        cameraManager.setTorchMode(cameraId, false);
+                        Thread.sleep(150); // Apagado
+                    }
+                    Thread.sleep(300); // Pausa entre letras
+
+                    // Letra S (Tres destellos cortos)
+                    for (int i = 0; i < 3; i++) {
+                        cameraManager.setTorchMode(cameraId, true);
+                        Thread.sleep(150);
+                        cameraManager.setTorchMode(cameraId, false);
+                        Thread.sleep(150);
+                    }
+
+                    // Pausa larga de 1.5 segundos antes del siguiente ciclo SOS
+                    Thread.sleep(1500);
+                }
+            } catch (Exception e) {
+                Log.e("Rastreador", "Error en la baliza SOS: " + e.getMessage());
+            }
+        }).start(); // ¡Arrancamos el hilo!
     }
 
     @SuppressLint("MissingPermission")
     private void obtenerUbicacionYEnviar() {
-        // Pedimos la ubicación con alta precisión
         locClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
                 .addOnCompleteListener(new OnCompleteListener<Location>() {
                     @Override
@@ -78,8 +126,6 @@ public class RastreadorGpsService extends Service {
                             Location location = task.getResult();
                             enviarSms(location);
                         } else {
-                            Log.e("Rastreador", "No se pudo obtener la ubicación");
-                            // Si falla, liberamos el WakeLock para no drenar batería
                             if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
                         }
                     }
@@ -92,20 +138,16 @@ public class RastreadorGpsService extends Service {
 
         if (numeroDestino.isEmpty()) return;
 
-        // Armamos el enlace de Google Maps
         String link = "https://maps.google.com/?q=" + loc.getLatitude() + "," + loc.getLongitude();
         String mensaje = "ALERTA DE SEGURIDAD. Ubicación actual: " + link;
 
         try {
             SmsManager smsManager = SmsManager.getDefault();
-            // Dividimos el mensaje por si supera el límite de caracteres de un SMS normal
             ArrayList<String> partes = smsManager.divideMessage(mensaje);
             smsManager.sendMultipartTextMessage(numeroDestino, null, partes, null, null);
-            Log.d("Rastreador", "SMS enviado exitosamente a: " + numeroDestino);
         } catch (Exception e) {
             Log.e("Rastreador", "Error al enviar SMS: " + e.getMessage());
         } finally {
-            // Ya enviamos el SMS, podemos dejar que el CPU descanse
             if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         }
     }
@@ -135,7 +177,7 @@ public class RastreadorGpsService extends Service {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
                     "Servicio de Rastreo Activo",
-                    NotificationManager.IMPORTANCE_LOW // Low para que no haga ruido, solo se vea el ícono
+                    NotificationManager.IMPORTANCE_LOW
             );
             if (nm != null) nm.createNotificationChannel(channel);
         }
